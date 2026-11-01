@@ -1,0 +1,89 @@
+name: AI Repository Builder
+
+on:
+  issues:
+    types: [opened]
+  issue_comment:
+    types: [created]
+
+jobs:
+  generate-code:
+    if: contains(github.event.comment.body, '@ai-bot') || contains(github.event.issue.body, '@ai-bot')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: pip install openai
+
+      - name: Call Free AI Model & Generate Files
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          PROMPT_TEXT: ${{ github.event.comment.body || github.event.issue.body }}
+        run: |
+          python - << 'EOF'
+          import os, json
+          from openai import OpenAI
+
+          client = OpenAI(
+              base_url="https://openrouter.ai/api/v1",
+              api_key=os.environ.get("OPENROUTER_API_KEY"),
+          )
+
+          prompt = os.environ.get("PROMPT_TEXT")
+
+          system_prompt = """
+          You are an expert full-stack developer. When given a request, write all necessary project files.
+          Respond ONLY with a valid JSON array of objects representing files.
+          Format:
+          [
+            {"path": "backend/pom.xml", "content": "..."},
+            {"path": "frontend/package.json", "content": "..."}
+          ]
+          Do NOT include markdown backticks around the json, only raw parseable JSON.
+          """
+
+          response = client.chat.completions.create(
+              model="deepseek/deepseek-chat:free",
+              messages=[
+                  {"role": "system", "content": system_prompt},
+                  {"role": "user", "content": prompt}
+              ],
+          )
+
+          content = response.choices[0].message.content.strip()
+          if content.startswith("```json"):
+              content = content[7:]
+          if content.endswith("```"):
+              content = content[:-3]
+
+          files = json.loads(content.strip())
+          for item in files:
+              file_path = item["path"]
+              os.makedirs(os.path.dirname(file_path), exist_ok=True)
+              with open(file_path, "w", encoding="utf-8") as f:
+                  f.write(item["content"])
+          print("Files generated successfully.")
+          EOF
+
+      - name: Commit and Push Generated Code
+        run: |
+          git config --global user.name "AI Builder Bot"
+          git config --global user.email "bot@github.com"
+          git checkout -b ai-generated-app
+          git add .
+          git commit -m "Scaffold project via DeepSeek / Qwen"
+          git push -u origin ai-generated-app --force
