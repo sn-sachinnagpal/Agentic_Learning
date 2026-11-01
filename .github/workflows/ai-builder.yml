@@ -131,10 +131,9 @@ jobs:
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git checkout -B ai-generated-app
           git add .
-          git commit -m "Scaffold project via OpenRouter free model"
-          git push -u origin ai-generated-app --force
+          git commit -m "Scaffold project via OpenRouter free model" || echo "No changes to commit"
+          git push origin main
 
       - name: Post Comment on Issue
         if: success() && github.event_name != 'workflow_dispatch'
