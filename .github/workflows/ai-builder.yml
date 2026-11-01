@@ -8,7 +8,7 @@ on:
 
 jobs:
   generate-code:
-    if: contains(github.event.comment.body, '@ai-bot') || contains(github.event.issue.body, '@ai-bot')
+    if: (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@ai-bot')) || (github.event_name == 'issues' && contains(github.event.issue.body, '@ai-bot'))
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -32,58 +32,90 @@ jobs:
       - name: Call Free AI Model & Generate Files
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          PROMPT_TEXT: ${{ github.event.comment.body || github.event.issue.body }}
+          USER_PROMPT: ${{ github.event.comment.body || github.event.issue.body }}
         run: |
           python - << 'EOF'
-          import os, json
+          import os, sys, json, re
           from openai import OpenAI
 
+          api_key = os.environ.get("OPENROUTER_API_KEY")
+          if not api_key:
+              print("::error::OPENROUTER_API_KEY secret is not set or empty in GitHub Secrets.")
+              sys.exit(1)
+
           client = OpenAI(
-              base_url="https://openrouter.ai/api/v1",
-              api_key=os.environ.get("OPENROUTER_API_KEY"),
+              base_url="[https://openrouter.ai/api/v1](https://openrouter.ai/api/v1)",
+              api_key=api_key,
           )
 
-          prompt = os.environ.get("PROMPT_TEXT")
+          user_prompt = os.environ.get("USER_PROMPT", "").replace("@ai-bot", "").strip()
+          if not user_prompt:
+              print("::error::User prompt was empty.")
+              sys.exit(1)
 
-          system_prompt = """
-          You are an expert full-stack developer. When given a request, write all necessary project files.
-          Respond ONLY with a valid JSON array of objects representing files.
-          Format:
-          [
-            {"path": "backend/pom.xml", "content": "..."},
-            {"path": "frontend/package.json", "content": "..."}
-          ]
-          Do NOT include markdown backticks around the json, only raw parseable JSON.
-          """
-
-          response = client.chat.completions.create(
-              model="deepseek/deepseek-chat:free",
-              messages=[
-                  {"role": "system", "content": system_prompt},
-                  {"role": "user", "content": prompt}
-              ],
+          system_prompt = (
+              "You are an expert software engineer. Generate a full, complete codebase based on the user's prompt. "
+              "Output ONLY a raw JSON array of objects without markdown fences, explanation, or conversational text. "
+              "Format: [{\"path\": \"relative/file/path.ext\", \"content\": \"file contents here\"}]"
           )
 
-          content = response.choices[0].message.content.strip()
-          if content.startswith("```json"):
-              content = content[7:]
-          if content.endswith("```"):
-              content = content[:-3]
+          print(f"Sending prompt to DeepSeek: {user_prompt[:80]}...")
+          try:
+              response = client.chat.completions.create(
+                  model="deepseek/deepseek-chat:free",
+                  messages=[
+                      {"role": "system", "content": system_prompt},
+                      {"role": "user", "content": user_prompt}
+                  ],
+                  temperature=0.2
+              )
+          except Exception as e:
+              print(f"::error::API Call failed: {e}")
+              sys.exit(1)
 
-          files = json.loads(content.strip())
+          raw = response.choices[0].message.content.strip()
+
+          # Strip markdown code blocks if the model included them
+          if "```" in raw:
+              match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", raw)
+              if match:
+                  raw = match.group(1).strip()
+
+          try:
+              files = json.loads(raw)
+          except Exception as e:
+              print("::error::Failed to parse JSON response from the model.")
+              print("Raw response received was:\n", raw[:1000])
+              sys.exit(1)
+
           for item in files:
-              file_path = item["path"]
+              file_path = item["path"].lstrip("/")
               os.makedirs(os.path.dirname(file_path), exist_ok=True)
               with open(file_path, "w", encoding="utf-8") as f:
                   f.write(item["content"])
-          print("Files generated successfully.")
+              print(f"Created {file_path}")
+
+          print(f"Generated {len(files)} files successfully.")
           EOF
 
       - name: Commit and Push Generated Code
         run: |
-          git config --global user.name "AI Builder Bot"
-          git config --global user.email "bot@github.com"
-          git checkout -b ai-generated-app
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -B ai-generated-app
           git add .
-          git commit -m "Scaffold project via DeepSeek / Qwen"
+          git commit -m "Scaffold project via DeepSeek"
           git push -u origin ai-generated-app --force
+
+      - name: Comment on Issue
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue_number = context.issue.number;
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue_number,
+              body: '🎉 Successfully generated codebase! Files are pushed to the [`ai-generated-app`](../../tree/ai-generated-app) branch.'
+            });
