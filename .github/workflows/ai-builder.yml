@@ -1,6 +1,12 @@
 name: AI Repository Builder
 
 on:
+  workflow_dispatch:
+    inputs:
+      prompt:
+        description: 'What would you like the AI to build?'
+        required: true
+        default: 'Scaffold a Java Spring Boot backend and Angular standalone frontend for a task manager app'
   issues:
     types: [opened]
   issue_comment:
@@ -8,7 +14,7 @@ on:
 
 jobs:
   generate-code:
-    if: (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@ai-bot')) || (github.event_name == 'issues' && contains(github.event.issue.body, '@ai-bot'))
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.comment.body, '@ai-bot') || contains(github.event.issue.body, '@ai-bot')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -32,7 +38,7 @@ jobs:
       - name: Call Free AI Model & Generate Files
         env:
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          USER_PROMPT: ${{ github.event.comment.body || github.event.issue.body }}
+          USER_PROMPT: ${{ github.event.inputs.prompt || github.event.comment.body || github.event.issue.body }}
         run: |
           python - << 'EOF'
           import os, sys, json, re, time, requests
@@ -55,9 +61,8 @@ jobs:
           )
 
           candidate_models = [
-              "deepseek/deepseek-r1:free",
-              "qwen/qwen-2.5-coder-32b-instruct:free",
-              "openrouter/free"
+              "openrouter/free",
+              "meta-llama/llama-3.3-70b-instruct:free"
           ]
 
           url = "https://openrouter.ai/api/v1/chat/completions"
@@ -80,7 +85,7 @@ jobs:
                   "temperature": 0.2
               }
               try:
-                  res = requests.post(url, headers=headers, json=payload, timeout=120)
+                  res = requests.post(url, headers=headers, json=payload, timeout=180)
                   if res.status_code == 200:
                       response_json = res.json()
                       print(f"Successfully received response from {model}.")
@@ -97,7 +102,6 @@ jobs:
 
           raw = response_json["choices"][0]["message"]["content"].strip()
 
-          # Strip markdown code blocks if present
           if "```" in raw:
               match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", raw)
               if match:
@@ -111,8 +115,11 @@ jobs:
               sys.exit(1)
 
           for item in files:
-              file_path = item["path"].lstrip("/")
-              os.makedirs(os.path.dirname(file_path), exist_ok=True)
+              file_path = item["path"].lstrip("/").strip()
+              dir_name = os.path.dirname(file_path)
+              # Only create directory if path contains a parent folder
+              if dir_name:
+                  os.makedirs(dir_name, exist_ok=True)
               with open(file_path, "w", encoding="utf-8") as f:
                   f.write(item["content"])
               print(f"Created: {file_path}")
@@ -130,7 +137,7 @@ jobs:
           git push -u origin ai-generated-app --force
 
       - name: Post Comment on Issue
-        if: success()
+        if: success() && github.event_name != 'workflow_dispatch'
         uses: actions/github-script@v7
         with:
           script: |
