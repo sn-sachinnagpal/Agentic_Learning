@@ -26,8 +26,8 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install Dependencies
-        run: pip install openai
+      - name: Install HTTP Library
+        run: pip install requests
 
       - name: Call Free AI Model & Generate Files
         env:
@@ -35,18 +35,12 @@ jobs:
           USER_PROMPT: ${{ github.event.comment.body || github.event.issue.body }}
         run: |
           python - << 'EOF'
-          import os, sys, json, re
-          from openai import OpenAI
+          import os, sys, json, re, time, requests
 
-          api_key = os.environ.get("OPENROUTER_API_KEY")
+          api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
           if not api_key:
-              print("::error::OPENROUTER_API_KEY secret is not set or empty in GitHub Secrets.")
+              print("::error::OPENROUTER_API_KEY secret is missing or empty in this repository.")
               sys.exit(1)
-
-          client = OpenAI(
-              base_url="[https://openrouter.ai/api/v1](https://openrouter.ai/api/v1)",
-              api_key=api_key,
-          )
 
           user_prompt = os.environ.get("USER_PROMPT", "").replace("@ai-bot", "").strip()
           if not user_prompt:
@@ -54,28 +48,56 @@ jobs:
               sys.exit(1)
 
           system_prompt = (
-              "You are an expert software engineer. Generate a full, complete codebase based on the user's prompt. "
-              "Output ONLY a raw JSON array of objects without markdown fences, explanation, or conversational text. "
-              "Format: [{\"path\": \"relative/file/path.ext\", \"content\": \"file contents here\"}]"
+              "You are an expert full-stack developer. Build the requested application. "
+              "Respond ONLY with a valid JSON array of objects. "
+              "Format: [{\"path\": \"relative/path.ext\", \"content\": \"file contents here\"}]. "
+              "Do not write markdown fences, conversational text, or explanation."
           )
 
-          print(f"Sending prompt to DeepSeek: {user_prompt[:80]}...")
-          try:
-              response = client.chat.completions.create(
-                  model="deepseek/deepseek-chat:free",
-                  messages=[
+          candidate_models = [
+              "deepseek/deepseek-r1:free",
+              "qwen/qwen-2.5-coder-32b-instruct:free",
+              "openrouter/free"
+          ]
+
+          url = "https://openrouter.ai/api/v1/chat/completions"
+          headers = {
+              "Authorization": f"Bearer {api_key}",
+              "HTTP-Referer": "https://github.com",
+              "X-Title": "GitHub Actions AI Builder",
+              "Content-Type": "application/json"
+          }
+
+          response_json = None
+          for model in candidate_models:
+              print(f"Attempting code generation with model: {model}...")
+              payload = {
+                  "model": model,
+                  "messages": [
                       {"role": "system", "content": system_prompt},
                       {"role": "user", "content": user_prompt}
                   ],
-                  temperature=0.2
-              )
-          except Exception as e:
-              print(f"::error::API Call failed: {e}")
+                  "temperature": 0.2
+              }
+              try:
+                  res = requests.post(url, headers=headers, json=payload, timeout=120)
+                  if res.status_code == 200:
+                      response_json = res.json()
+                      print(f"Successfully received response from {model}.")
+                      break
+                  else:
+                      print(f"::warning::{model} returned status {res.status_code}: {res.text}")
+              except requests.exceptions.RequestException as e:
+                  print(f"::warning::{model} network connection error: {e}")
+              time.sleep(3)
+
+          if not response_json or "choices" not in response_json:
+              print("::error::All free model endpoints failed or timed out.")
               sys.exit(1)
 
-          raw = response.choices[0].message.content.strip()
+          raw = response_json["choices"][0]["message"]["content"].strip()
 
-          # Strip markdown code blocks if the model included them
+          # Strip markdown code blocks if present
           if "```" in raw:
               match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", raw)
               if match:
@@ -84,8 +106,8 @@ jobs:
           try:
               files = json.loads(raw)
           except Exception as e:
-              print("::error::Failed to parse JSON response from the model.")
-              print("Raw response received was:\n", raw[:1000])
+              print("::error::Model response could not be parsed as JSON.")
+              print("Raw response excerpt:\n", raw[:1200])
               sys.exit(1)
 
           for item in files:
@@ -93,21 +115,21 @@ jobs:
               os.makedirs(os.path.dirname(file_path), exist_ok=True)
               with open(file_path, "w", encoding="utf-8") as f:
                   f.write(item["content"])
-              print(f"Created {file_path}")
+              print(f"Created: {file_path}")
 
           print(f"Generated {len(files)} files successfully.")
           EOF
 
-      - name: Commit and Push Generated Code
+      - name: Commit and Push Code
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git checkout -B ai-generated-app
           git add .
-          git commit -m "Scaffold project via DeepSeek"
+          git commit -m "Scaffold project via OpenRouter free model"
           git push -u origin ai-generated-app --force
 
-      - name: Comment on Issue
+      - name: Post Comment on Issue
         if: success()
         uses: actions/github-script@v7
         with:
@@ -117,5 +139,5 @@ jobs:
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: issue_number,
-              body: '🎉 Successfully generated codebase! Files are pushed to the [`ai-generated-app`](../../tree/ai-generated-app) branch.'
+              body: '🎉 Codebase successfully generated! View the code on branch [`ai-generated-app`](../../tree/ai-generated-app).'
             });
